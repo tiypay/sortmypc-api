@@ -175,12 +175,14 @@ def me(user: dict = Depends(get_current_user)):
 # ── Sort route ────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "Tu es un expert en organisation de fichiers. "
-    "Tu reçois une liste de fichiers avec parfois un aperçu visuel ou textuel. "
-    "Propose une structure de dossiers logique. "
+    "Tu es un expert en organisation de fichiers et dossiers. "
+    "Tu reçois une liste d'éléments : des fichiers (avec parfois un aperçu visuel ou textuel) "
+    "et des dossiers (marqués [Dossier]). "
+    "Propose une structure logique pour tout organiser ensemble. "
     "Réponds UNIQUEMENT en JSON valide. "
-    'Format : {"Nom_Dossier": ["fichier1.pdf", "fichier2.jpg"], ...}. '
-    "Noms de dossiers courts et clairs en français. Mets les inclassables dans 'Divers'."
+    'Format : {"Nom_Categorie": ["fichier1.pdf", "DossierA", "fichier2.jpg"], ...}. '
+    "Noms de catégories courts et clairs en français. Mets les inclassables dans 'Divers'. "
+    "Traite les dossiers exactement comme les fichiers : place leur nom dans la bonne catégorie."
 )
 
 
