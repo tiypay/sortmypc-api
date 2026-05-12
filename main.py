@@ -53,7 +53,7 @@ def init_db():
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     email TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
-                    credits INTEGER DEFAULT 3,
+                    credits INTEGER DEFAULT 13,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
                 CREATE TABLE IF NOT EXISTS payments (
