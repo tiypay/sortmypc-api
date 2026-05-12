@@ -270,15 +270,20 @@ def sort_files(body: SortRequest, user: dict = Depends(get_current_user)):
 def create_checkout(body: CheckoutRequest, user: dict = Depends(get_current_user)):
     if not STRIPE_PRICE_ID:
         raise HTTPException(status_code=500, detail="Stripe non configuré")
-    session = stripe.checkout.Session.create(
-        payment_method_types=["card"],
-        line_items=[{"price": STRIPE_PRICE_ID, "quantity": body.credits}],
-        mode="payment",
-        success_url=f"{BACKEND_URL}/payments/success?session_id={{CHECKOUT_SESSION_ID}}",
-        cancel_url=f"{BACKEND_URL}/payments/cancel",
-        metadata={"user_id": str(user["id"]), "credits": body.credits * 10},
-    )
-    return {"url": session.url}
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{"price": STRIPE_PRICE_ID, "quantity": body.credits}],
+            mode="payment",
+            success_url=f"{BACKEND_URL}/payments/success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{BACKEND_URL}/payments/cancel",
+            metadata={"user_id": str(user["id"]), "credits": body.credits * 10},
+        )
+        return {"url": session.url}
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=500, detail=f"Erreur Stripe : {e.user_message or str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur paiement : {str(e)}")
 
 
 @app.get("/payments/success")
