@@ -56,6 +56,7 @@ def init_db():
                     credits INTEGER DEFAULT 13,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
+                ALTER TABLE users ALTER COLUMN credits SET DEFAULT 13;
                 CREATE TABLE IF NOT EXISTS payments (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     user_id UUID REFERENCES users(id),
