@@ -181,8 +181,10 @@ SYSTEM_PROMPT = (
     "Tu reçois une liste d'éléments (fichiers et dossiers). "
     "Propose une structure HIÉRARCHIQUE avec 10 à 20 grandes catégories au niveau 1. "
     "Chaque catégorie de niveau 1 peut contenir des sous-catégories (niveau 2) si utile. "
+    "RÈGLES DE NOMMAGE OBLIGATOIRES : "
+    "utilise des espaces (jamais d'underscores ni de tirets), première lettre majuscule, noms courts en français. "
     "Réponds UNIQUEMENT en JSON valide, sans texte avant ni après. "
-    'Format : {"Categorie1": {"SousCat1": ["f1.pdf", "f2.jpg"], "SousCat2": ["f3.mp4"]}, '
+    'Format : {"Categorie1": {"Sous Cat1": ["f1.pdf", "f2.jpg"], "Sous Cat2": ["f3.mp4"]}, '
     '"Categorie2": ["f4.docx", "f5.txt"]}. '
     "Les valeurs de niveau 1 sont soit un objet de sous-catégories, soit une liste directe. "
     "Noms courts et clairs en français. Mets les inclassables dans 'Divers'."
@@ -230,34 +232,50 @@ def _sort_batch(client: anthropic.Anthropic, batch: list[FileItem]) -> dict:
     return _parse_json(msg.content[0].text)
 
 
+def _normalize(s: str) -> str:
+    """Normalize a category name for deduplication: lowercase, spaces instead of _/-."""
+    return ' '.join(s.replace('_', ' ').replace('-', ' ').split()).lower()
+
+
 def _deep_merge(base: dict, patch: dict) -> dict:
-    """Merge patch into base, handling nested dicts recursively."""
+    """Merge patch into base with normalized key matching to prevent near-duplicate categories."""
+    norm_map = {_normalize(k): k for k in base}
+
     for k, v in patch.items():
-        if k not in base:
+        existing = norm_map.get(_normalize(k))
+
+        if existing is None:
             base[k] = v
-        elif isinstance(base[k], dict) and isinstance(v, dict):
-            _deep_merge(base[k], v)
-        elif isinstance(base[k], list) and isinstance(v, list):
-            base[k].extend(v)
-        elif isinstance(base[k], list) and isinstance(v, dict):
-            old = base[k]
-            base[k] = dict(v)
+            norm_map[_normalize(k)] = k
+        elif isinstance(base[existing], dict) and isinstance(v, dict):
+            _deep_merge(base[existing], v)
+        elif isinstance(base[existing], list) and isinstance(v, list):
+            base[existing].extend(v)
+        elif isinstance(base[existing], list) and isinstance(v, dict):
+            old = base[existing]
+            base[existing] = dict(v)
             if old:
-                base[k].setdefault("Divers", []).extend(old)
-        elif isinstance(base[k], dict) and isinstance(v, list):
-            base[k].setdefault("Divers", []).extend(v)
+                base[existing].setdefault("Divers", []).extend(old)
+        elif isinstance(base[existing], dict) and isinstance(v, list):
+            base[existing].setdefault("Divers", []).extend(v)
+
     return base
 
 
 CONSOLIDATION_PROMPT = (
     "Tu reçois une liste de noms de catégories de fichiers générés par plusieurs analyses indépendantes. "
-    "Beaucoup de catégories sont des doublons avec des noms légèrement différents "
-    "(ex: 'Cours_Mathematiques', 'Cours - Mathématiques', 'Cours Mathématiques' → même chose). "
-    "Regroupe-les en 10 à 20 grandes catégories unifiées en français. "
+    "Ta mission : regrouper en 10 à 15 grandes catégories unifiées. "
+    "RÈGLES STRICTES : "
+    "1. Fusionne TOUTES les catégories similaires ou qui se chevauchent, même si les noms diffèrent légèrement "
+    "(ex: 'Cours_Maths', 'Cours - Mathématiques', 'Mathématiques Cours', 'Cours Mathématiques' → 'Mathématiques'). "
+    "2. Fusionne les catégories dont les thèmes se recoupent "
+    "(ex: 'Ressources Multimédia' + 'Multimédia' → 'Multimédia'). "
+    "3. N'utilise 'Divers' QUE pour les fichiers vraiment inclassables — si une catégorie a un thème clair, "
+    "elle doit aller dans la bonne grande catégorie, jamais dans Divers. "
+    "4. Noms avec espaces (jamais d'underscores), première lettre majuscule, courts, en français. "
     "Réponds UNIQUEMENT en JSON valide, sans texte avant ni après. "
     'Format : {"GrandeCategorie": ["ancienneCat1", "ancienneCat2"], ...}. '
-    "Chaque ancienne catégorie doit apparaître exactement une fois dans le JSON. "
-    "Noms de grandes catégories courts et clairs en français."
+    "Chaque ancienne catégorie doit apparaître exactement une fois."
 )
 
 
