@@ -10,10 +10,10 @@ import jwt
 import stripe
 import anthropic
 import psycopg2
-import psycopg2.extrash
+import psycopg2.extras
 from PIL import Image
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddlewareh
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
