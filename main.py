@@ -54,10 +54,10 @@ def init_db():
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     email TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
-                    credits INTEGER DEFAULT 3,
+                    credits INTEGER DEFAULT 1,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
-                ALTER TABLE users ALTER COLUMN credits SET DEFAULT 3;
+                ALTER TABLE users ALTER COLUMN credits SET DEFAULT 1;
                 CREATE TABLE IF NOT EXISTS payments (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     user_id UUID REFERENCES users(id),
@@ -178,13 +178,14 @@ def me(user: dict = Depends(get_current_user)):
 
 SYSTEM_PROMPT = (
     "Tu es un expert en organisation de fichiers et dossiers. "
-    "Tu reçois une liste d'éléments : des fichiers (avec parfois un aperçu visuel ou textuel) "
-    "et des dossiers (marqués [Dossier]). "
-    "Propose une structure logique pour tout organiser ensemble. "
-    "Réponds UNIQUEMENT en JSON valide. "
-    'Format : {"Nom_Categorie": ["fichier1.pdf", "DossierA", "fichier2.jpg"], ...}. '
-    "Noms de catégories courts et clairs en français. Mets les inclassables dans 'Divers'. "
-    "Traite les dossiers exactement comme les fichiers : place leur nom dans la bonne catégorie."
+    "Tu reçois une liste d'éléments (fichiers et dossiers). "
+    "Propose une structure HIÉRARCHIQUE avec 10 à 20 grandes catégories au niveau 1. "
+    "Chaque catégorie de niveau 1 peut contenir des sous-catégories (niveau 2) si utile. "
+    "Réponds UNIQUEMENT en JSON valide, sans texte avant ni après. "
+    'Format : {"Categorie1": {"SousCat1": ["f1.pdf", "f2.jpg"], "SousCat2": ["f3.mp4"]}, '
+    '"Categorie2": ["f4.docx", "f5.txt"]}. '
+    "Les valeurs de niveau 1 sont soit un objet de sous-catégories, soit une liste directe. "
+    "Noms courts et clairs en français. Mets les inclassables dans 'Divers'."
 )
 
 
@@ -223,10 +224,30 @@ def _sort_batch(client: anthropic.Anthropic, batch: list[FileItem]) -> dict:
 
     content = [{"type": "text", "text": "\n".join(intro_lines)}] + image_blocks
     msg = client.messages.create(
-        model=AI_MODEL, max_tokens=4096, system=SYSTEM_PROMPT,
+        model=AI_MODEL, max_tokens=8192, system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
     )
     return _parse_json(msg.content[0].text)
+
+
+def _deep_merge(base: dict, patch: dict) -> dict:
+    """Merge patch into base, handling nested dicts recursively."""
+    for k, v in patch.items():
+        if k not in base:
+            base[k] = v
+        elif isinstance(base[k], dict) and isinstance(v, dict):
+            _deep_merge(base[k], v)
+        elif isinstance(base[k], list) and isinstance(v, list):
+            base[k].extend(v)
+        elif isinstance(base[k], list) and isinstance(v, dict):
+            # Upgrade flat list → nested dict, existing items go to Divers
+            old = base[k]
+            base[k] = dict(v)
+            if old:
+                base[k].setdefault("Divers", []).extend(old)
+        elif isinstance(base[k], dict) and isinstance(v, list):
+            base[k].setdefault("Divers", []).extend(v)
+    return base
 
 
 @app.post("/sort")
@@ -254,8 +275,7 @@ def sort_files(body: SortRequest, user: dict = Depends(get_current_user)):
         merged: dict = {}
         for batch in batches:
             plan = _sort_batch(ai_client, batch)
-            for folder, files in plan.items():
-                merged.setdefault(folder, []).extend(files)
+            _deep_merge(merged, plan)
     except Exception as e:
         # Refund on AI error
         with get_conn() as conn:
@@ -340,4 +360,4 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_keep_alive=620)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
