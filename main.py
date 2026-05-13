@@ -10,7 +10,7 @@ import jwt
 import stripe
 import anthropic
 import psycopg2
-import psycopg2.extras
+import psycopg2.extrash
 from PIL import Image
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,10 +54,10 @@ def init_db():
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     email TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
-                    credits INTEGER DEFAULT 3,
+                    credits INTEGER DEFAULT 1,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
-                ALTER TABLE users ALTER COLUMN credits SET DEFAULT 3;
+                ALTER TABLE users ALTER COLUMN credits SET DEFAULT 1;
                 CREATE TABLE IF NOT EXISTS payments (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     user_id UUID REFERENCES users(id),
