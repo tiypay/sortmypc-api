@@ -131,6 +131,7 @@ class FileItem(BaseModel):
     extension: str
     image_b64: str | None = None
     text_preview: str | None = None
+    folder: str | None = None   # dossier parent pour contexte
 
 class SortRequest(BaseModel):
     files: list[FileItem]
@@ -212,17 +213,18 @@ def _sort_batch(client: anthropic.Anthropic, batch: list[FileItem]) -> dict:
     images_used = 0
 
     for f in batch:
+        ctx = f" (📂 {f.folder})" if f.folder else ""
         if f.image_b64 and images_used < MAX_IMAGES_CALL:
-            image_blocks.append({"type": "text", "text": f"\n[{f.name}] :"})
+            image_blocks.append({"type": "text", "text": f"\n[{f.name}]{ctx} :"})
             image_blocks.append({
                 "type": "image",
                 "source": {"type": "base64", "media_type": "image/jpeg", "data": f.image_b64},
             })
             images_used += 1
         elif f.text_preview:
-            intro_lines.append(f"[{f.name}] → {f.text_preview[:150]}")
+            intro_lines.append(f"[{f.name}]{ctx} → {f.text_preview[:150]}")
         else:
-            intro_lines.append(f.name)
+            intro_lines.append(f"{f.name}{ctx}")
 
     content = [{"type": "text", "text": "\n".join(intro_lines)}] + image_blocks
     msg = client.messages.create(
@@ -344,7 +346,9 @@ def sort_files(body: SortRequest, user: dict = Depends(get_current_user)):
 
     try:
         ai_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        batches = [body.files[i:i + BATCH_SIZE] for i in range(0, len(body.files), BATCH_SIZE)]
+        # Trier par dossier parent pour que les fichiers liés arrivent dans le même batch
+        files_ordered = sorted(body.files, key=lambda f: (f.folder or '').lower())
+        batches = [files_ordered[i:i + BATCH_SIZE] for i in range(0, len(files_ordered), BATCH_SIZE)]
         merged: dict = {}
         for batch in batches:
             plan = _sort_batch(ai_client, batch)
