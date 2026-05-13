@@ -27,7 +27,8 @@ SUPABASE_DB_URL   = os.getenv("SUPABASE_DB_URL", "")
 JWT_SECRET        = os.getenv("JWT_SECRET", "change-me")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_ID   = os.getenv("STRIPE_PRICE_ID", "")
+STRIPE_PRICE_ID      = os.getenv("STRIPE_PRICE_ID", "")
+STRIPE_PRICE_ID_1    = os.getenv("STRIPE_PRICE_ID_1", "price_1TWUFvLm8MCEET5iwA1Pu1uR")
 BACKEND_URL       = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 AI_MODEL       = "claude-haiku-4-5-20251001"
@@ -135,7 +136,8 @@ class SortRequest(BaseModel):
     files: list[FileItem]
 
 class CheckoutRequest(BaseModel):
-    credits: int  # number of credit packs to buy
+    credits: int   # number of credit packs to buy
+    pack: str = "10"  # "10" = 10 crédits à 2.99€, "1" = 1 crédit à 1€
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
 
@@ -271,13 +273,19 @@ def create_checkout(body: CheckoutRequest, user: dict = Depends(get_current_user
     if not STRIPE_PRICE_ID:
         raise HTTPException(status_code=500, detail="Stripe non configuré")
     try:
+        if body.pack == "1":
+            price_id = STRIPE_PRICE_ID_1
+            credits_to_add = body.credits * 1
+        else:
+            price_id = STRIPE_PRICE_ID
+            credits_to_add = body.credits * 10
         session = stripe.checkout.Session.create(
             payment_method_types=["card"],
-            line_items=[{"price": STRIPE_PRICE_ID, "quantity": body.credits}],
+            line_items=[{"price": price_id, "quantity": body.credits}],
             mode="payment",
             success_url=f"{BACKEND_URL}/payments/success?session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{BACKEND_URL}/payments/cancel",
-            metadata={"user_id": str(user["id"]), "credits": body.credits * 10},
+            metadata={"user_id": str(user["id"]), "credits": credits_to_add},
         )
         return {"url": session.url}
     except stripe.error.StripeError as e:
