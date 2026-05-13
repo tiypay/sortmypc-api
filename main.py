@@ -240,7 +240,6 @@ def _deep_merge(base: dict, patch: dict) -> dict:
         elif isinstance(base[k], list) and isinstance(v, list):
             base[k].extend(v)
         elif isinstance(base[k], list) and isinstance(v, dict):
-            # Upgrade flat list → nested dict, existing items go to Divers
             old = base[k]
             base[k] = dict(v)
             if old:
@@ -248,6 +247,62 @@ def _deep_merge(base: dict, patch: dict) -> dict:
         elif isinstance(base[k], dict) and isinstance(v, list):
             base[k].setdefault("Divers", []).extend(v)
     return base
+
+
+CONSOLIDATION_PROMPT = (
+    "Tu reçois une liste de noms de catégories de fichiers générés par plusieurs analyses indépendantes. "
+    "Beaucoup de catégories sont des doublons avec des noms légèrement différents "
+    "(ex: 'Cours_Mathematiques', 'Cours - Mathématiques', 'Cours Mathématiques' → même chose). "
+    "Regroupe-les en 10 à 20 grandes catégories unifiées en français. "
+    "Réponds UNIQUEMENT en JSON valide, sans texte avant ni après. "
+    'Format : {"GrandeCategorie": ["ancienneCat1", "ancienneCat2"], ...}. '
+    "Chaque ancienne catégorie doit apparaître exactement une fois dans le JSON. "
+    "Noms de grandes catégories courts et clairs en français."
+)
+
+
+def _consolidate(client: anthropic.Anthropic, merged: dict) -> dict:
+    """Second AI pass: collapse 50-200 redundant categories into 10-20 unified ones."""
+    if len(merged) <= 20:
+        return merged  # Already clean, skip
+
+    category_names = list(merged.keys())
+    msg = client.messages.create(
+        model=AI_MODEL,
+        max_tokens=4096,
+        system=CONSOLIDATION_PROMPT,
+        messages=[{"role": "user", "content": json.dumps(category_names, ensure_ascii=False)}],
+    )
+    mapping = _parse_json(msg.content[0].text)
+
+    new_merged: dict = {}
+    mapped_old: set = set()
+
+    for new_cat, old_cats in mapping.items():
+        new_merged[new_cat] = {}
+        for old_cat in old_cats:
+            if old_cat not in merged:
+                continue
+            mapped_old.add(old_cat)
+            val = merged[old_cat]
+            if isinstance(val, list):
+                new_merged[new_cat].setdefault("Divers", []).extend(val)
+            elif isinstance(val, dict):
+                _deep_merge(new_merged[new_cat], val)
+        # If subcategory ended up with only a "Divers" key and nothing else, flatten it
+        if list(new_merged[new_cat].keys()) == ["Divers"]:
+            new_merged[new_cat] = new_merged[new_cat]["Divers"]
+
+    # Unmapped categories go to Divers
+    for old_cat, val in merged.items():
+        if old_cat not in mapped_old:
+            divers = new_merged.setdefault("Divers", {})
+            if isinstance(val, list):
+                divers.setdefault("Divers", []).extend(val)
+            elif isinstance(val, dict):
+                _deep_merge(divers, val)
+
+    return new_merged
 
 
 @app.post("/sort")
@@ -276,6 +331,8 @@ def sort_files(body: SortRequest, user: dict = Depends(get_current_user)):
         for batch in batches:
             plan = _sort_batch(ai_client, batch)
             _deep_merge(merged, plan)
+        # Second pass: consolidate redundant categories into 10-20 unified ones
+        merged = _consolidate(ai_client, merged)
     except Exception as e:
         # Refund on AI error
         with get_conn() as conn:
