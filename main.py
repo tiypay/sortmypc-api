@@ -34,7 +34,7 @@ BACKEND_URL       = os.getenv("BACKEND_URL", "http://localhost:8000")
 AI_MODEL       = "claude-haiku-4-5-20251001"
 FILES_PER_CREDIT = 100
 JWT_EXPIRE_DAYS  = 30
-MAX_IMAGE_PX     = 300
+MAX_IMAGE_PX     = 150
 MAX_IMAGES_CALL  = 100
 BATCH_SIZE       = 100
 
