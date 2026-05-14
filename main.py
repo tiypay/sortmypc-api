@@ -14,7 +14,7 @@ import psycopg2.extras
 from PIL import Image
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
 
@@ -442,6 +442,25 @@ async def stripe_webhook(request: Request):
                     )
                 conn.commit()
     return {"ok": True}
+
+
+@app.get("/download/SortMyPC.exe")
+async def download_exe():
+    """Proxy the SortMyPC.exe installer without any client-side redirect."""
+    import httpx
+    DIRECT_URL = "https://github.com/tiypay/sortmypc-desktop/releases/download/v1.4.0/SortMyPC.exe"
+
+    async def stream():
+        async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
+            async with client.stream("GET", DIRECT_URL) as resp:
+                async for chunk in resp.aiter_bytes(65536):
+                    yield chunk
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": "attachment; filename=SortMyPC.exe"},
+    )
 
 
 @app.get("/health")
