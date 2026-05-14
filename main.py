@@ -202,9 +202,21 @@ def _parse_json(raw: str) -> dict:
     raw = raw.strip()
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        # "Extra data" = texte après le JSON valide → on tronque au bon endroit
+        if "Extra data" in str(e):
+            try:
+                return json.loads(raw[:e.pos].strip())
+            except Exception:
+                pass
+        # Backslashes invalides (chemins Windows dans les noms)
         fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
-        return json.loads(fixed)
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError as e2:
+            if "Extra data" in str(e2):
+                return json.loads(fixed[:e2.pos].strip())
+            raise
 
 
 def _sort_batch(client: anthropic.Anthropic, batch: list[FileItem]) -> dict:
@@ -289,7 +301,7 @@ def _consolidate(client: anthropic.Anthropic, merged: dict) -> dict:
     category_names = list(merged.keys())
     msg = client.messages.create(
         model=AI_MODEL,
-        max_tokens=4096,
+        max_tokens=8192,
         system=CONSOLIDATION_PROMPT,
         messages=[{"role": "user", "content": json.dumps(category_names, ensure_ascii=False)}],
     )
