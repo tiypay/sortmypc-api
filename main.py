@@ -194,29 +194,63 @@ SYSTEM_PROMPT = (
 
 def _parse_json(raw: str) -> dict:
     import re
+
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
     raw = raw.strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        # "Extra data" = texte après le JSON valide → on tronque au bon endroit
-        if "Extra data" in str(e):
-            try:
-                return json.loads(raw[:e.pos].strip())
-            except Exception:
-                pass
-        # Backslashes invalides (chemins Windows dans les noms)
-        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
+
+    def _try(s: str):
         try:
-            return json.loads(fixed)
-        except json.JSONDecodeError as e2:
-            if "Extra data" in str(e2):
-                return json.loads(fixed[:e2.pos].strip())
-            raise
+            return json.loads(s)
+        except json.JSONDecodeError as e:
+            if "Extra data" in str(e):
+                try:
+                    return json.loads(s[:e.pos].strip())
+                except Exception:
+                    pass
+        return None
+
+    # 1. Tentative directe
+    r = _try(raw)
+    if r is not None:
+        return r
+
+    # 2. Fix backslashes invalides (chemins Windows)
+    fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
+    r = _try(fixed)
+    if r is not None:
+        return r
+
+    # 3. Fix virgules manquantes entre éléments JSON (bug fréquent de Claude)
+    #    "valeur1"\n"valeur2"  →  "valeur1",\n"valeur2"
+    fixed = re.sub(r'"\s*\n(\s*)"', r'",\n\1"', fixed)
+    r = _try(fixed)
+    if r is not None:
+        return r
+
+    #    ]\n"clé"  ou  }\n"clé"  →  ],\n"clé"
+    fixed = re.sub(r'([\]\}])\s*\n(\s*)"', r'\1,\n\2"', fixed)
+    r = _try(fixed)
+    if r is not None:
+        return r
+
+    # 4. Supprimer les virgules en trop (trailing commas)
+    fixed = re.sub(r',\s*([\]\}])', r'\1', fixed)
+    r = _try(fixed)
+    if r is not None:
+        return r
+
+    # 5. Dernier recours : extraire le premier bloc {...} valide
+    match = re.search(r'\{.*\}', fixed, re.DOTALL)
+    if match:
+        r = _try(match.group())
+        if r is not None:
+            return r
+
+    raise ValueError(f"JSON invalide après toutes les corrections : {raw[:200]}")
 
 
 def _sort_batch(client: anthropic.Anthropic, batch: list[FileItem]) -> dict:
@@ -239,6 +273,7 @@ def _sort_batch(client: anthropic.Anthropic, batch: list[FileItem]) -> dict:
             intro_lines.append(f"{f.name}{ctx}")
 
     content = [{"type": "text", "text": "\n".join(intro_lines)}] + image_blocks
+
     msg = client.messages.create(
         model=AI_MODEL, max_tokens=8192, system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
