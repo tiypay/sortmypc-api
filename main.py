@@ -14,7 +14,7 @@ import psycopg2.extras
 from PIL import Image
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
 
@@ -496,6 +496,59 @@ async def download_exe():
         media_type="application/octet-stream",
         headers={"Content-Disposition": "attachment; filename=SortMyPC.exe"},
     )
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy_policy():
+    return """<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Politique de confidentialité — SortMyPC</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #222; line-height: 1.7; }
+    h1 { color: #1a1a2e; } h2 { color: #16213e; margin-top: 30px; }
+    a { color: #3b82f6; } footer { margin-top: 40px; color: #888; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>Politique de confidentialité — SortMyPC</h1>
+  <p><em>Dernière mise à jour : mai 2026</em></p>
+
+  <p>SortMyPC est une application Windows qui utilise l'intelligence artificielle pour organiser vos fichiers.
+  Cette politique explique comment nous collectons et utilisons vos données.</p>
+
+  <h2>1. Données collectées</h2>
+  <ul>
+    <li><strong>Adresse e-mail</strong> : lors de la création de votre compte.</li>
+    <li><strong>Métadonnées de fichiers</strong> : noms, extensions et aperçus de vos fichiers (jamais le contenu complet). Ces données sont envoyées à l'API Claude (Anthropic) pour générer le plan de tri.</li>
+    <li><strong>Données de paiement</strong> : traitées exclusivement par Stripe. Nous ne stockons aucune information bancaire.</li>
+    <li><strong>Historique d'utilisation</strong> : nombre de crédits utilisés.</li>
+  </ul>
+
+  <h2>2. Utilisation des données</h2>
+  <p>Vos données sont utilisées uniquement pour faire fonctionner l'application : tri de fichiers par IA, gestion de votre compte et traitement des paiements. Nous ne vendons ni ne partageons vos données avec des tiers à des fins publicitaires.</p>
+
+  <h2>3. Services tiers</h2>
+  <ul>
+    <li><strong>Anthropic (Claude AI)</strong> : traitement des métadonnées pour le tri. <a href="https://www.anthropic.com/privacy">Politique Anthropic</a></li>
+    <li><strong>Stripe</strong> : paiements sécurisés. <a href="https://stripe.com/fr/privacy">Politique Stripe</a></li>
+    <li><strong>Supabase</strong> : base de données hébergée. <a href="https://supabase.com/privacy">Politique Supabase</a></li>
+  </ul>
+
+  <h2>4. Conservation des données</h2>
+  <p>Vos données sont conservées tant que votre compte est actif. Vous pouvez demander la suppression de votre compte en nous contactant.</p>
+
+  <h2>5. Vos droits</h2>
+  <p>Conformément au RGPD, vous disposez d'un droit d'accès, de rectification et de suppression de vos données. Contactez-nous à : <a href="mailto:support@sortmypc.app">support@sortmypc.app</a></p>
+
+  <h2>6. Contact</h2>
+  <p>Pour toute question : <a href="mailto:support@sortmypc.app">support@sortmypc.app</a></p>
+
+  <footer>© 2026 SortMyPC. Tous droits réservés.</footer>
+</body>
+</html>"""
 
 
 @app.get("/health")
