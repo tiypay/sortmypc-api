@@ -67,6 +67,13 @@ def init_db():
                     status TEXT DEFAULT 'pending',
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
+                CREATE TABLE IF NOT EXISTS referrals (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    email TEXT UNIQUE NOT NULL,
+                    ref_code TEXT UNIQUE NOT NULL,
+                    referred_by TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
             """)
         conn.commit()
 
@@ -477,6 +484,107 @@ async def stripe_webhook(request: Request):
                     )
                 conn.commit()
     return {"ok": True}
+
+
+# ── Referral system ───────────────────────────────────────────────────────────
+
+import secrets
+import string
+
+RANK_THRESHOLDS = [
+    (25, "legend",      50),   # 25 invités → 50 crédits bonus
+    (10, "diamond",     50),   # 10 invités → 50 crédits bonus
+    (3,  "blazer",      10),   # 3  invités → 10 crédits bonus
+    (1,  "starlighter",  3),   # 1  invité  → 3  crédits bonus
+]
+
+def _gen_ref_code(n=8):
+    chars = string.ascii_uppercase + string.digits
+    return ''.join(secrets.choice(chars) for _ in range(n))
+
+
+class ReferralRegister(BaseModel):
+    email: EmailStr
+    referred_by: str | None = None
+
+
+@app.post("/referral/register", status_code=201)
+def referral_register(body: ReferralRegister):
+    """Register an email for the referral program. Returns a unique ref_code."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # Check if already registered
+            cur.execute("SELECT ref_code FROM referrals WHERE email = %s", (body.email,))
+            existing = cur.fetchone()
+            if existing:
+                raise HTTPException(status_code=409, detail="Email déjà inscrit")
+
+            # Generate unique ref code
+            for _ in range(10):
+                code = _gen_ref_code()
+                cur.execute("SELECT 1 FROM referrals WHERE ref_code = %s", (code,))
+                if not cur.fetchone():
+                    break
+
+            # Insert
+            cur.execute(
+                "INSERT INTO referrals (email, ref_code, referred_by) VALUES (%s, %s, %s)",
+                (body.email, code, body.referred_by)
+            )
+
+            # Grant bonus credits to referrer if they exist
+            if body.referred_by:
+                cur.execute(
+                    "SELECT email FROM referrals WHERE ref_code = %s",
+                    (body.referred_by,)
+                )
+                referrer = cur.fetchone()
+                if referrer:
+                    cur.execute(
+                        "SELECT COUNT(*) as cnt FROM referrals WHERE referred_by = %s",
+                        (body.referred_by,)
+                    )
+                    new_count = (cur.fetchone()["cnt"] or 0) + 1
+                    # Check if this count hits a new rank threshold
+                    for (threshold, rank, bonus) in RANK_THRESHOLDS:
+                        if new_count == threshold:
+                            # Grant bonus to registered user if they have an account
+                            cur.execute(
+                                "UPDATE users SET credits = credits + %s WHERE email = %s",
+                                (bonus, referrer["email"])
+                            )
+                            break
+
+        conn.commit()
+    return {"ref_code": code, "email": body.email}
+
+
+@app.get("/referral/stats/{code_or_email}")
+def referral_stats(code_or_email: str):
+    """Get referral stats by ref_code or email."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # Try by ref_code first, then email
+            cur.execute(
+                "SELECT * FROM referrals WHERE ref_code = %s OR email = %s",
+                (code_or_email, code_or_email)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Introuvable")
+
+            cur.execute(
+                "SELECT COUNT(*) as cnt FROM referrals WHERE referred_by = %s",
+                (row["ref_code"],)
+            )
+            count = cur.fetchone()["cnt"] or 0
+
+    return {
+        "ref_code": row["ref_code"],
+        "email": row["email"],
+        "referral_count": count,
+        "created_at": str(row["created_at"]),
+    }
 
 
 @app.get("/download/SortMyPC.exe")
