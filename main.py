@@ -492,10 +492,10 @@ import secrets
 import string
 
 RANK_THRESHOLDS = [
-    (25, "legend",      50),   # 25 invités → 50 crédits bonus
-    (10, "diamond",     50),   # 10 invités → 50 crédits bonus
-    (3,  "blazer",      10),   # 3  invités → 10 crédits bonus
-    (1,  "starlighter",  3),   # 1  invité  → 3  crédits bonus
+    (100, "legend",     720),  # 100 invités → 1 mois illimité (~720 crédits)
+    (50,  "diamond",    20),   # 50  invités → 20 crédits bonus
+    (25,  "blazer",     8),    # 25  invités → 8  crédits bonus
+    (10, "starlighter",  3),   # 10 invités → 3  crédits bonus
 ]
 
 def _gen_ref_code(n=8):
