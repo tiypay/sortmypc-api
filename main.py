@@ -30,6 +30,8 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID      = os.getenv("STRIPE_PRICE_ID", "")
 STRIPE_PRICE_ID_1    = os.getenv("STRIPE_PRICE_ID_1", "price_1TWUFvLm8MCEET5iwA1Pu1uR")
 BACKEND_URL       = os.getenv("BACKEND_URL", "http://localhost:8000")
+RESEND_API_KEY    = os.getenv("RESEND_API_KEY", "")
+FROM_EMAIL        = os.getenv("FROM_EMAIL", "SortMyPC <noreply@raw-x.fr>")
 
 AI_MODEL       = "claude-haiku-4-5-20251001"
 FILES_PER_CREDIT = 100
@@ -73,6 +75,16 @@ def init_db():
                     ref_code TEXT UNIQUE NOT NULL,
                     referred_by TEXT,
                     created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS promo_codes (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    code TEXT UNIQUE NOT NULL,
+                    email TEXT NOT NULL,
+                    credits INTEGER NOT NULL,
+                    rank TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    redeemed_at TIMESTAMPTZ,
+                    redeemed_by TEXT
                 );
             """)
         conn.commit()
@@ -503,14 +515,114 @@ def _gen_ref_code(n=8):
     return ''.join(secrets.choice(chars) for _ in range(n))
 
 
+RANK_PREFIXES = {
+    "starlighter": "STAR",
+    "blazer":      "BLAZ",
+    "diamond":     "DIAM",
+    "legend":      "LGND",
+}
+
+RANK_LABELS = {
+    "starlighter": "Starlighter ⭐",
+    "blazer":      "Blazer 🔥",
+    "diamond":     "Diamond 💎",
+    "legend":      "Legend 👑",
+}
+
+
+def _gen_promo_code(rank: str) -> str:
+    prefix = RANK_PREFIXES.get(rank, "PRMO")
+    suffix = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
+    return f"{prefix}-{suffix}"
+
+
+def _send_promo_email(to_email: str, rank: str, credits: int, code: str):
+    """Send promo code email via Resend API."""
+    if not RESEND_API_KEY:
+        print(f"[EMAIL SKIP] No RESEND_API_KEY — code for {to_email}: {code}")
+        return
+    try:
+        import urllib.request
+        rank_label = RANK_LABELS.get(rank, rank.capitalize())
+        subject = f"🎉 Tu as atteint {rank_label} — voici ton code promo SortMyPC"
+        html = f"""
+<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="UTF-8"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+             background:#0D1117;color:#E6EDF3;margin:0;padding:40px 0;">
+  <div style="max-width:480px;margin:0 auto;background:#161B22;border-radius:16px;
+              border:1px solid #21262D;overflow:hidden;">
+    <div style="background:linear-gradient(135deg,#2979FF,#00C853);padding:24px 32px;">
+      <h1 style="margin:0;font-size:22px;color:#fff">🎉 Nouveau rang débloqué !</h1>
+      <p style="margin:6px 0 0;color:rgba(255,255,255,.85);font-size:14px">
+        Tu as atteint <strong>{rank_label}</strong> sur SortMyPC
+      </p>
+    </div>
+    <div style="padding:32px;">
+      <p style="margin:0 0 20px;color:#8B949E;font-size:14px">
+        Félicitations ! Tu as parrainé suffisamment d'amis pour monter de rang.<br>
+        Voici ton récompense : <strong style="color:#E6EDF3">+{credits} crédit(s)</strong> offerts.
+      </p>
+      <p style="margin:0 0 8px;font-size:13px;color:#8B949E;
+                letter-spacing:.06em;text-transform:uppercase;font-weight:700">
+        Ton code promo
+      </p>
+      <div style="background:#0D1117;border:1.5px solid #2979FF;border-radius:10px;
+                  padding:16px 24px;text-align:center;margin-bottom:24px;">
+        <span style="font-size:26px;font-weight:900;letter-spacing:.12em;
+                     color:#fff;font-family:monospace">{code}</span>
+      </div>
+      <p style="margin:0 0 20px;font-size:13px;color:#8B949E;">
+        Ouvre l'application <strong style="color:#E6EDF3">SortMyPC</strong>,
+        clique sur <strong style="color:#E6EDF3">🎁 Code promo</strong> dans le header
+        et saisis ce code pour recevoir tes crédits.
+      </p>
+      <a href="https://apps.microsoft.com/store/detail/sortmypc/9MZVN3MF00LS"
+         style="display:block;background:#2979FF;color:#fff;text-decoration:none;
+                border-radius:10px;padding:12px;text-align:center;
+                font-weight:700;font-size:14px;">
+        Ouvrir SortMyPC
+      </a>
+    </div>
+    <div style="padding:16px 32px;border-top:1px solid #21262D;
+                font-size:12px;color:#4B5563;text-align:center;">
+      SortMyPC · raw-x.fr · Ce code est à usage unique.
+    </div>
+  </div>
+</body>
+</html>"""
+        payload = json.dumps({
+            "from": FROM_EMAIL,
+            "to": [to_email],
+            "subject": subject,
+            "html": html,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.resend.com/emails",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(f"[EMAIL OK] Sent to {to_email} (rank={rank}) → {resp.status}")
+    except Exception as e:
+        print(f"[EMAIL ERR] {e} — code was: {code}")
+
+
 class ReferralRegister(BaseModel):
     email: EmailStr
     referred_by: str | None = None
 
 
 @app.post("/referral/register", status_code=201)
-def referral_register(body: ReferralRegister):
+def referral_register(body: ReferralRegister, bg: BackgroundTasks):
     """Register an email for the referral program. Returns a unique ref_code."""
+    promo_task = None  # (email, rank, credits, promo_code) to send after commit
+
     with get_conn() as conn:
         with conn.cursor() as cur:
             # Check if already registered
@@ -532,7 +644,7 @@ def referral_register(body: ReferralRegister):
                 (body.email, code, body.referred_by)
             )
 
-            # Grant bonus credits to referrer if they exist
+            # Check if referrer hits a new rank threshold → generate promo code
             if body.referred_by:
                 cur.execute(
                     "SELECT email FROM referrals WHERE ref_code = %s",
@@ -540,23 +652,74 @@ def referral_register(body: ReferralRegister):
                 )
                 referrer = cur.fetchone()
                 if referrer:
+                    referrer_email = referrer["email"]
                     cur.execute(
                         "SELECT COUNT(*) as cnt FROM referrals WHERE referred_by = %s",
                         (body.referred_by,)
                     )
                     new_count = (cur.fetchone()["cnt"] or 0) + 1
-                    # Check if this count hits a new rank threshold
+
                     for (threshold, rank, bonus) in RANK_THRESHOLDS:
                         if new_count == threshold:
-                            # Grant bonus to registered user if they have an account
+                            # Check we haven't already sent a promo for this rank
                             cur.execute(
-                                "UPDATE users SET credits = credits + %s WHERE email = %s",
-                                (bonus, referrer["email"])
+                                "SELECT 1 FROM promo_codes WHERE email = %s AND rank = %s",
+                                (referrer_email, rank)
                             )
+                            if not cur.fetchone():
+                                promo_code = _gen_promo_code(rank)
+                                cur.execute(
+                                    """INSERT INTO promo_codes (code, email, credits, rank)
+                                       VALUES (%s, %s, %s, %s)""",
+                                    (promo_code, referrer_email, bonus, rank)
+                                )
+                                promo_task = (referrer_email, rank, bonus, promo_code)
                             break
 
         conn.commit()
+
+    # Send email outside the transaction
+    if promo_task:
+        bg.add_task(_send_promo_email, *promo_task)
+
     return {"ref_code": code, "email": body.email}
+
+
+class PromoRedeem(BaseModel):
+    code: str
+
+
+@app.post("/promo/redeem")
+def promo_redeem(body: PromoRedeem, user: dict = Depends(get_current_user)):
+    """Validate and redeem a promo code. Adds credits to the authenticated user."""
+    code = body.code.strip().upper()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM promo_codes WHERE code = %s", (code,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Code invalide ou inexistant.")
+            if row["redeemed_at"]:
+                raise HTTPException(status_code=409, detail="Ce code a déjà été utilisé.")
+            credits = row["credits"]
+            # Mark as redeemed
+            cur.execute(
+                "UPDATE promo_codes SET redeemed_at = NOW(), redeemed_by = %s WHERE code = %s",
+                (user["email"], code)
+            )
+            # Add credits to the user
+            cur.execute(
+                "UPDATE users SET credits = credits + %s WHERE id = %s RETURNING credits",
+                (credits, user["id"])
+            )
+            new_balance = cur.fetchone()["credits"]
+        conn.commit()
+    return {
+        "credits": credits,
+        "credits_remaining": new_balance,
+        "rank": row["rank"],
+        "code": code,
+    }
 
 
 @app.get("/referral/stats/{code_or_email}")
