@@ -822,6 +822,115 @@ def privacy_policy():
 </html>"""
 
 
+# ── Forgot / Reset Password ───────────────────────────────────────────────────
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+def _send_reset_email(to_email: str, token: str):
+    if not RESEND_API_KEY:
+        print(f"[RESET SKIP] token={token}")
+        return
+    try:
+        import urllib.request as _ur
+        html = (
+            "<!DOCTYPE html><html lang='fr'><head><meta charset='UTF-8'></head>"
+            "<body style='font-family:Segoe UI,sans-serif;background:#F7F8FA;margin:0;padding:40px 0;'>"
+            "<div style='max-width:480px;margin:0 auto;background:#fff;border-radius:16px;"
+            "border:1px solid #E5E9EF;overflow:hidden;'>"
+            "<div style='background:linear-gradient(90deg,#1565C0,#2979FF);padding:28px 32px;'>"
+            "<h1 style='margin:0;font-size:20px;color:#fff;font-weight:700;'>"
+            "Réinitialisation du mot de passe</h1>"
+            "<p style='margin:6px 0 0;color:rgba(255,255,255,.8);font-size:14px;'>SortMyPC</p></div>"
+            "<div style='padding:32px;'>"
+            "<p style='color:#374151;font-size:14px;margin:0 0 16px;'>Voici ton code de réinitialisation :</p>"
+            f"<div style='background:#F0F4FF;border:1.5px solid #2979FF;border-radius:10px;"
+            f"padding:16px 24px;text-align:center;margin-bottom:20px;'>"
+            f"<span style='font-size:18px;font-weight:800;letter-spacing:.1em;"
+            f"color:#1565C0;font-family:monospace;'>{token}</span></div>"
+            "<p style='color:#9CA3AF;font-size:12px;margin:0;'>Expire dans <strong>1 heure</strong>."
+            " Si tu n'as pas fait cette demande, ignore cet email.</p>"
+            "</div></div></body></html>"
+        )
+        payload = json.dumps({
+            "from": FROM_EMAIL,
+            "to": [to_email],
+            "subject": "Réinitialisation de ton mot de passe SortMyPC",
+            "html": html,
+        }).encode("utf-8")
+        req = _ur.Request(
+            "https://api.resend.com/emails", data=payload,
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with _ur.urlopen(req, timeout=10) as resp:
+            print(f"[RESET OK] {to_email} -> {resp.status}")
+    except Exception as e:
+        print(f"[RESET ERR] {e}")
+
+
+@app.post("/auth/forgot-password")
+def forgot_password(body: ForgotPasswordRequest, bg: BackgroundTasks):
+    import secrets as _sec
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s", (body.email,))
+            user = cur.fetchone()
+            if not user:
+                return {"message": "Si cet email existe, un code a été envoyé."}
+            token = _sec.token_urlsafe(32)
+            expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+                    token TEXT UNIQUE NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    used BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("DELETE FROM password_reset_tokens WHERE user_id = %s", (user["id"],))
+            cur.execute(
+                "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (%s, %s, %s)",
+                (user["id"], token, expires_at),
+            )
+            conn.commit()
+    bg.add_task(_send_reset_email, body.email, token)
+    return {"message": "Si cet email existe, un code a été envoyé."}
+
+
+@app.post("/auth/reset-password")
+def reset_password(body: ResetPasswordRequest):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = %s",
+                (body.token,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=400, detail="Code invalide.")
+            if row["used"]:
+                raise HTTPException(status_code=400, detail="Ce code a déjà été utilisé.")
+            if datetime.now(timezone.utc) > row["expires_at"]:
+                raise HTTPException(status_code=400, detail="Ce code a expiré.")
+            cur.execute(
+                "UPDATE users SET password_hash = %s WHERE id = %s",
+                (hash_password(body.new_password), row["user_id"]),
+            )
+            cur.execute(
+                "UPDATE password_reset_tokens SET used = TRUE WHERE token = %s",
+                (body.token,),
+            )
+            conn.commit()
+    return {"message": "Mot de passe mis à jour avec succès."}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
