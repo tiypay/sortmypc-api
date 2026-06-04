@@ -150,8 +150,8 @@ def get_current_user(authorization: str = Header(...)) -> dict:
 
 
 def is_subscribed(user: dict) -> bool:
-    """Abonnement actif et non expiré."""
-    if user.get("subscription_status") != "active":
+    """Abonnement actif (ou résilié mais pas encore expiré)."""
+    if user.get("subscription_status") not in ("active", "canceling"):
         return False
     until = user.get("subscription_until")
     if until is None:
@@ -527,6 +527,27 @@ def subscription_status(user: dict = Depends(get_current_user)):
         "status": user.get("subscription_status", "inactive"),
         "until": str(user["subscription_until"]) if user.get("subscription_until") else None,
     }
+
+
+@app.post("/subscription/cancel")
+def cancel_subscription(user: dict = Depends(get_current_user)):
+    """Résilie l'abonnement à la fin de la période en cours (accès conservé jusque-là)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT stripe_subscription_id FROM users WHERE id = %s", (user["id"],))
+            row = cur.fetchone()
+    sub_id = row["stripe_subscription_id"] if row else None
+    if not sub_id:
+        raise HTTPException(status_code=400, detail="Aucun abonnement actif.")
+    try:
+        stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=500, detail=f"Erreur Stripe : {e.user_message or str(e)}")
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET subscription_status = 'canceling' WHERE id = %s", (user["id"],))
+        conn.commit()
+    return {"ok": True, "status": "canceling"}
 
 
 @app.post("/payments/webhook")
