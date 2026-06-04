@@ -484,9 +484,8 @@ SORT_ONE_PROMPT = (
 @app.post("/sort-one")
 def sort_one(body: SortOneRequest, user: dict = Depends(get_current_user)):
     """Décide le meilleur dossier pour un seul fichier (tri automatique). Abonnés."""
-    # ⚠️ TEST temporaire — à réactiver avant build Store
-    # if not is_subscribed(user):
-    #     raise HTTPException(status_code=402, detail="Réservé aux abonnés Pro")
+    if not is_subscribed(user):
+        raise HTTPException(status_code=402, detail="Réservé aux abonnés Pro")
 
     folders_list = [f for f in body.folders if f][:250]
     try:
