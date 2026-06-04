@@ -34,6 +34,7 @@ RESEND_API_KEY    = os.getenv("RESEND_API_KEY", "")
 FROM_EMAIL        = os.getenv("FROM_EMAIL", "SortMyPC <noreply@raw-x.fr>")
 
 AI_MODEL       = "claude-haiku-4-5-20251001"
+SUB_PRICE_CENTS  = 499  # Abonnement SortMyPC Pro : 4,99 €/mois
 FILES_PER_CREDIT = 100
 JWT_EXPIRE_DAYS  = 30
 MAX_IMAGE_PX     = 150
@@ -60,6 +61,10 @@ def init_db():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
                 ALTER TABLE users ALTER COLUMN credits SET DEFAULT 3;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_status TEXT DEFAULT 'inactive';
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until TIMESTAMPTZ;
                 CREATE TABLE IF NOT EXISTS payments (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     user_id UUID REFERENCES users(id),
@@ -133,11 +138,24 @@ def get_current_user(authorization: str = Header(...)) -> dict:
     payload = decode_token(authorization[7:])
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, email, credits FROM users WHERE id = %s", (payload["sub"],))
+            cur.execute(
+                "SELECT id, email, credits, subscription_status, subscription_until "
+                "FROM users WHERE id = %s", (payload["sub"],)
+            )
             user = cur.fetchone()
     if not user:
         raise HTTPException(status_code=401, detail="Utilisateur introuvable")
     return dict(user)
+
+
+def is_subscribed(user: dict) -> bool:
+    """Abonnement actif et non expiré."""
+    if user.get("subscription_status") != "active":
+        return False
+    until = user.get("subscription_until")
+    if until is None:
+        return True
+    return datetime.now(timezone.utc) <= until
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -192,7 +210,13 @@ def login(body: AuthRequest):
 
 @app.get("/me")
 def me(user: dict = Depends(get_current_user)):
-    return {"email": user["email"], "credits": user["credits"]}
+    return {
+        "email": user["email"],
+        "credits": user["credits"],
+        "subscribed": is_subscribed(user),
+        "subscription_status": user.get("subscription_status", "inactive"),
+        "subscription_until": str(user["subscription_until"]) if user.get("subscription_until") else None,
+    }
 
 # ── Sort route ────────────────────────────────────────────────────────────────
 
@@ -393,22 +417,26 @@ def _consolidate(client: anthropic.Anthropic, merged: dict) -> dict:
 
 @app.post("/sort")
 def sort_files(body: SortRequest, user: dict = Depends(get_current_user)):
-    needed = max(1, -(-len(body.files) // FILES_PER_CREDIT))
-    if user["credits"] < needed:
-        raise HTTPException(status_code=402, detail=f"Crédits insuffisants ({user['credits']}/{needed})")
+    subscriber = is_subscribed(user)
+    needed = 0 if subscriber else max(1, -(-len(body.files) // FILES_PER_CREDIT))
 
-    # Debit credits first
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE users SET credits = credits - %s WHERE id = %s AND credits >= %s RETURNING credits",
-                (needed, user["id"], needed),
-            )
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=402, detail="Crédits insuffisants")
-        conn.commit()
-        remaining = row["credits"]
+    if not subscriber:
+        if user["credits"] < needed:
+            raise HTTPException(status_code=402, detail=f"Crédits insuffisants ({user['credits']}/{needed})")
+        # Debit credits first (sauf abonnés = illimité)
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET credits = credits - %s WHERE id = %s AND credits >= %s RETURNING credits",
+                    (needed, user["id"], needed),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=402, detail="Crédits insuffisants")
+            conn.commit()
+            remaining = row["credits"]
+    else:
+        remaining = user["credits"]
 
     try:
         ai_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -469,6 +497,43 @@ def payment_cancel():
     return {"message": "Paiement annulé."}
 
 
+@app.post("/subscription/checkout")
+def create_subscription_checkout(user: dict = Depends(get_current_user)):
+    """Crée une session d'abonnement mensuel SortMyPC Pro (prix inline, pas de Price ID requis)."""
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "eur",
+                    "product_data": {"name": "SortMyPC Pro", "description": "Tri automatique en temps réel + tri illimité"},
+                    "unit_amount": SUB_PRICE_CENTS,
+                    "recurring": {"interval": "month"},
+                },
+                "quantity": 1,
+            }],
+            success_url=f"{BACKEND_URL}/payments/success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{BACKEND_URL}/payments/cancel",
+            client_reference_id=str(user["id"]),
+            metadata={"user_id": str(user["id"]), "type": "subscription"},
+        )
+        return {"url": session.url}
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=500, detail=f"Erreur Stripe : {e.user_message or str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur abonnement : {str(e)}")
+
+
+@app.get("/subscription/status")
+def subscription_status(user: dict = Depends(get_current_user)):
+    return {
+        "subscribed": is_subscribed(user),
+        "status": user.get("subscription_status", "inactive"),
+        "until": str(user["subscription_until"]) if user.get("subscription_until") else None,
+    }
+
+
 @app.post("/payments/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
@@ -478,9 +543,34 @@ async def stripe_webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Webhook invalide")
 
-    if event["type"] == "checkout.session.completed":
+    etype = event["type"]
+
+    if etype == "checkout.session.completed":
         session = event["data"]["object"]
-        if session["payment_status"] == "paid":
+
+        # ── Abonnement ──
+        if session.get("mode") == "subscription":
+            user_id = session.get("metadata", {}).get("user_id")
+            customer_id = session.get("customer")
+            sub_id = session.get("subscription")
+            until = None
+            try:
+                sub = stripe.Subscription.retrieve(sub_id)
+                until = datetime.fromtimestamp(sub["current_period_end"], tz=timezone.utc)
+            except Exception:
+                until = datetime.now(timezone.utc) + timedelta(days=31)
+            if user_id:
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE users SET subscription_status='active', stripe_customer_id=%s, "
+                            "stripe_subscription_id=%s, subscription_until=%s WHERE id=%s",
+                            (customer_id, sub_id, until, user_id),
+                        )
+                    conn.commit()
+
+        # ── Achat de crédits ──
+        elif session.get("payment_status") == "paid":
             user_id = session["metadata"]["user_id"]
             credits_to_add = int(session["metadata"]["credits"])
             with get_conn() as conn:
@@ -495,6 +585,36 @@ async def stripe_webhook(request: Request):
                         (user_id, session["id"], credits_to_add, session["amount_total"]),
                     )
                 conn.commit()
+
+    # ── Renouvellement mensuel ──
+    elif etype == "invoice.payment_succeeded":
+        inv = event["data"]["object"]
+        sub_id = inv.get("subscription")
+        if sub_id:
+            try:
+                sub = stripe.Subscription.retrieve(sub_id)
+                until = datetime.fromtimestamp(sub["current_period_end"], tz=timezone.utc)
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE users SET subscription_status='active', subscription_until=%s "
+                            "WHERE stripe_subscription_id=%s", (until, sub_id),
+                        )
+                    conn.commit()
+            except Exception:
+                pass
+
+    # ── Annulation / expiration ──
+    elif etype == "customer.subscription.deleted":
+        sub = event["data"]["object"]
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET subscription_status='canceled' WHERE stripe_subscription_id=%s",
+                    (sub["id"],),
+                )
+            conn.commit()
+
     return {"ok": True}
 
 
