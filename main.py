@@ -174,6 +174,13 @@ class FileItem(BaseModel):
 class SortRequest(BaseModel):
     files: list[FileItem]
 
+class SortOneRequest(BaseModel):
+    name: str
+    extension: str | None = None
+    image_b64: str | None = None
+    text_preview: str | None = None
+    folders: list[str] = []   # dossiers existants chez l'utilisateur
+
 class CheckoutRequest(BaseModel):
     credits: int   # number of credit packs to buy
     pack: str = "10"  # "10" = 10 crédits à 2.99€, "1" = 1 crédit à 1€
@@ -459,6 +466,55 @@ def sort_files(body: SortRequest, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Erreur IA : {e}")
 
     return {"plan": merged, "credits_used": needed, "credits_remaining": remaining}
+
+
+SORT_ONE_PROMPT = (
+    "Tu ranges UN SEUL fichier dans l'ordinateur d'un utilisateur. "
+    "On te donne le fichier (nom, et son aperçu image ou texte si dispo) et la LISTE des dossiers déjà existants. "
+    "Choisis le dossier EXISTANT le plus pertinent pour ranger ce fichier. "
+    "Analyse le contenu : une image d'un personnage de manga/anime va dans un dossier type 'Manga' ou 'Anime' s'il existe, "
+    "une facture dans 'Factures', une capture de jeu dans le dossier du jeu, etc. "
+    "Si AUCUN dossier existant ne convient vraiment, propose un NOUVEAU nom de dossier court et clair en français. "
+    "Réponds UNIQUEMENT en JSON valide, sans texte autour : "
+    '{"folder": "Nom du dossier", "is_new": true/false}. '
+    "Noms avec espaces (jamais d'underscores), première lettre majuscule."
+)
+
+
+@app.post("/sort-one")
+def sort_one(body: SortOneRequest, user: dict = Depends(get_current_user)):
+    """Décide le meilleur dossier pour un seul fichier (tri automatique). Abonnés."""
+    if not is_subscribed(user):
+        raise HTTPException(status_code=402, detail="Réservé aux abonnés Pro")
+
+    folders_list = [f for f in body.folders if f][:250]
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        intro = (
+            f"Fichier à ranger : {body.name}\n"
+            f"Dossiers existants : {json.dumps(folders_list, ensure_ascii=False)}"
+        )
+        content = [{"type": "text", "text": intro}]
+        if body.image_b64:
+            content.append({"type": "text", "text": "\nAperçu de l'image :"})
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": body.image_b64},
+            })
+        elif body.text_preview:
+            content[0]["text"] += f"\nAperçu du contenu : {body.text_preview[:150]}"
+
+        msg = client.messages.create(
+            model=AI_MODEL, max_tokens=300, system=SORT_ONE_PROMPT,
+            messages=[{"role": "user", "content": content}],
+        )
+        res = _parse_json(msg.content[0].text)
+        folder = (res.get("folder") or "Divers").strip()
+        is_new = bool(res.get("is_new", folder not in folders_list))
+        return {"folder": folder, "is_new": is_new}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur IA : {e}")
+
 
 # ── Payments ──────────────────────────────────────────────────────────────────
 
