@@ -29,6 +29,7 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID      = os.getenv("STRIPE_PRICE_ID", "")
 STRIPE_PRICE_ID_1    = os.getenv("STRIPE_PRICE_ID_1", "price_1TWUFvLm8MCEET5iwA1Pu1uR")
+STRIPE_SUB_PRICE_ID  = os.getenv("STRIPE_SUB_PRICE_ID", "price_1TebaqLm8MCEET5i3St4juxw")  # Abonnement Pro 4,99€/mois
 BACKEND_URL       = os.getenv("BACKEND_URL", "http://localhost:8000")
 RESEND_API_KEY    = os.getenv("RESEND_API_KEY", "")
 FROM_EMAIL        = os.getenv("FROM_EMAIL", "SortMyPC <noreply@raw-x.fr>")
@@ -500,19 +501,13 @@ def payment_cancel():
 @app.post("/subscription/checkout")
 def create_subscription_checkout(user: dict = Depends(get_current_user)):
     """Crée une session d'abonnement mensuel SortMyPC Pro (prix inline, pas de Price ID requis)."""
+    if not STRIPE_SUB_PRICE_ID:
+        raise HTTPException(status_code=500, detail="Abonnement non configuré")
     try:
         session = stripe.checkout.Session.create(
             mode="subscription",
             payment_method_types=["card"],
-            line_items=[{
-                "price_data": {
-                    "currency": "eur",
-                    "product_data": {"name": "SortMyPC Pro", "description": "Tri automatique en temps réel + tri illimité"},
-                    "unit_amount": SUB_PRICE_CENTS,
-                    "recurring": {"interval": "month"},
-                },
-                "quantity": 1,
-            }],
+            line_items=[{"price": STRIPE_SUB_PRICE_ID, "quantity": 1}],
             success_url=f"{BACKEND_URL}/payments/success?session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{BACKEND_URL}/payments/cancel",
             client_reference_id=str(user["id"]),
