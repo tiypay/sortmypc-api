@@ -678,15 +678,29 @@ def referral_register(body: ReferralRegister, bg: BackgroundTasks):
 
         conn.commit()
 
-    # Send email outside the transaction
-    if promo_task:
-        bg.add_task(_send_promo_email, *promo_task)
+    # Le code promo est déjà enregistré en base et sera affiché dans l'app
+    # (plus d'envoi d'email pour les codes promo — récupération via /promo/pending)
 
     return {"ref_code": code, "email": body.email}
 
 
 class PromoRedeem(BaseModel):
     code: str
+
+
+@app.get("/promo/pending")
+def promo_pending(user: dict = Depends(get_current_user)):
+    """Liste les codes promo non utilisés de l'utilisateur (affichés dans l'app)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT code, credits, rank FROM promo_codes "
+                "WHERE email = %s AND redeemed_at IS NULL "
+                "ORDER BY created_at DESC",
+                (user["email"],),
+            )
+            rows = cur.fetchall()
+    return {"codes": [dict(r) for r in rows]}
 
 
 @app.post("/promo/redeem")
