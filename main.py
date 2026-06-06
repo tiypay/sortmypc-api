@@ -40,7 +40,7 @@ FILES_PER_CREDIT = 100
 JWT_EXPIRE_DAYS  = 30
 MAX_IMAGE_PX     = 150
 MAX_IMAGES_CALL  = 100
-BATCH_SIZE       = 100
+BATCH_SIZE       = 60
 
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -294,12 +294,22 @@ def _parse_json(raw: str) -> dict:
     if r is not None:
         return r
 
-    # 5. Dernier recours : extraire le premier bloc {...} valide
+    # 5. Extraire le premier bloc {...} valide
     match = re.search(r'\{.*\}', fixed, re.DOTALL)
     if match:
         r = _try(match.group())
         if r is not None:
             return r
+
+    # 6. Réparation robuste (gère le JSON tronqué : ferme les accolades/crochets ouverts)
+    try:
+        from json_repair import repair_json
+        repaired = repair_json(raw)
+        r = _try(repaired)
+        if isinstance(r, dict) and r:
+            return r
+    except Exception:
+        pass
 
     raise ValueError(f"JSON invalide après toutes les corrections : {raw[:200]}")
 
@@ -326,7 +336,7 @@ def _sort_batch(client: anthropic.Anthropic, batch: list[FileItem]) -> dict:
     content = [{"type": "text", "text": "\n".join(intro_lines)}] + image_blocks
 
     msg = client.messages.create(
-        model=AI_MODEL, max_tokens=8192, system=SYSTEM_PROMPT,
+        model=AI_MODEL, max_tokens=16000, system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
     )
     return _parse_json(msg.content[0].text)
@@ -387,7 +397,7 @@ def _consolidate(client: anthropic.Anthropic, merged: dict) -> dict:
     category_names = list(merged.keys())
     msg = client.messages.create(
         model=AI_MODEL,
-        max_tokens=8192,
+        max_tokens=16000,
         system=CONSOLIDATION_PROMPT,
         messages=[{"role": "user", "content": json.dumps(category_names, ensure_ascii=False)}],
     )
