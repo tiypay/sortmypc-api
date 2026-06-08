@@ -66,6 +66,7 @@ def init_db():
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until TIMESTAMPTZ;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS has_sorted BOOLEAN DEFAULT FALSE;
                 CREATE TABLE IF NOT EXISTS payments (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     user_id UUID REFERENCES users(id),
@@ -187,8 +188,26 @@ class CheckoutRequest(BaseModel):
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
 
+# ── Anti-fraude : domaines d'emails jetables interdits ────────────────────────
+DISPOSABLE_DOMAINS = {
+    "minitts.net", "yopmail.com", "yopmail.fr", "mailinator.com", "guerrillamail.com",
+    "guerrillamail.info", "grr.la", "sharklasers.com", "10minutemail.com",
+    "tempmail.com", "temp-mail.org", "trashmail.com", "throwawaymail.com",
+    "getnada.com", "maildrop.cc", "mohmal.com", "fakemail.net", "dispostable.com",
+    "mailnesia.com", "tempr.email", "emailondeck.com", "tmail.ws", "33mail.com",
+    "spamgourmet.com", "discard.email", "mailcatch.com", "moakt.com", "tmpmail.org",
+    "yo.yo",
+}
+
+def _is_disposable(email: str) -> bool:
+    domain = email.split("@")[-1].lower().strip()
+    return domain in DISPOSABLE_DOMAINS
+
+
 @app.post("/auth/register")
 def register(body: AuthRequest):
+    if _is_disposable(body.email):
+        raise HTTPException(status_code=400, detail="Adresse email non autorisée. Utilise une vraie adresse.")
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM users WHERE email = %s", (body.email,))
@@ -475,6 +494,34 @@ def sort_files(body: SortRequest, user: dict = Depends(get_current_user)):
             conn.commit()
         raise HTTPException(status_code=500, detail=f"Erreur IA : {e}")
 
+    # ── Marque l'utilisateur comme actif (a fait un vrai tri) et, si c'est son
+    #    premier tri, valide le parrainage de celui qui l'a invité.
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET has_sorted = TRUE WHERE id = %s AND has_sorted = FALSE RETURNING email",
+                    (user["id"],),
+                )
+                just_activated = cur.fetchone()
+                if just_activated:
+                    cur.execute(
+                        "SELECT referred_by FROM referrals WHERE LOWER(email) = LOWER(%s)",
+                        (user["email"],),
+                    )
+                    ref = cur.fetchone()
+                    if ref and ref["referred_by"]:
+                        cur.execute(
+                            "SELECT email FROM referrals WHERE ref_code = %s",
+                            (ref["referred_by"],),
+                        )
+                        referrer = cur.fetchone()
+                        if referrer:
+                            _award_referral_ranks(cur, referrer["email"], ref["referred_by"])
+            conn.commit()
+    except Exception:
+        pass  # un souci de parrainage ne doit jamais faire échouer le tri
+
     return {"plan": merged, "credits_used": needed, "credits_remaining": remaining}
 
 
@@ -738,6 +785,35 @@ def _gen_promo_code(rank: str) -> str:
     return f"{prefix}-{suffix}"
 
 
+# ── Anti-fraude parrainage : un invité ne compte que s'il a un vrai compte
+#    ET a réellement utilisé l'app (au moins 1 tri). Empêche le farming d'emails.
+def _validated_referral_count(cur, code: str, referrer_email: str) -> int:
+    cur.execute(
+        """SELECT COUNT(*) AS cnt FROM referrals r
+           JOIN users u ON LOWER(u.email) = LOWER(r.email)
+           WHERE r.referred_by = %s AND u.has_sorted = TRUE
+             AND LOWER(r.email) <> LOWER(%s)""",
+        (code, referrer_email),
+    )
+    return (cur.fetchone()["cnt"] or 0)
+
+
+def _award_referral_ranks(cur, referrer_email: str, code: str) -> None:
+    """Attribue les codes promo de rang selon le nombre d'invités VALIDÉS."""
+    count = _validated_referral_count(cur, code, referrer_email)
+    for (threshold, rank, bonus) in sorted(RANK_THRESHOLDS):  # 10, 25, 50, 100
+        if count >= threshold:
+            cur.execute(
+                "SELECT 1 FROM promo_codes WHERE email = %s AND rank = %s",
+                (referrer_email, rank),
+            )
+            if not cur.fetchone():
+                cur.execute(
+                    "INSERT INTO promo_codes (code, email, credits, rank) VALUES (%s, %s, %s, %s)",
+                    (_gen_promo_code(rank), referrer_email, bonus, rank),
+                )
+
+
 def _send_promo_email(to_email: str, rank: str, credits: int, code: str):
     """Send promo code email via Resend API."""
     if not RESEND_API_KEY:
@@ -823,7 +899,17 @@ class ReferralRegister(BaseModel):
 @app.post("/referral/register", status_code=201)
 def referral_register(body: ReferralRegister, bg: BackgroundTasks):
     """Register an email for the referral program. Returns a unique ref_code."""
-    promo_task = None  # (email, rank, credits, promo_code) to send after commit
+    # Anti-fraude : on n'enregistre pas les emails jetables dans le parrainage
+    if _is_disposable(body.email):
+        raise HTTPException(status_code=400, detail="Adresse email non autorisée.")
+    # Anti auto-parrainage : on ne peut pas se parrainer soi-même
+    if body.referred_by:
+        with get_conn() as conn0:
+            with conn0.cursor() as cur0:
+                cur0.execute("SELECT ref_code FROM referrals WHERE LOWER(email) = LOWER(%s)", (body.email,))
+                own = cur0.fetchone()
+                if own and own["ref_code"] == body.referred_by:
+                    body.referred_by = None  # ignore le code si c'est le sien
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -840,48 +926,13 @@ def referral_register(body: ReferralRegister, bg: BackgroundTasks):
                 if not cur.fetchone():
                     break
 
-            # Insert
+            # Insert (le parrainage NE compte PAS encore : il sera validé
+            # quand cet utilisateur aura un vrai compte ET fait au moins 1 tri)
             cur.execute(
                 "INSERT INTO referrals (email, ref_code, referred_by) VALUES (%s, %s, %s)",
                 (body.email, code, body.referred_by)
             )
-
-            # Check if referrer hits a new rank threshold → generate promo code
-            if body.referred_by:
-                cur.execute(
-                    "SELECT email FROM referrals WHERE ref_code = %s",
-                    (body.referred_by,)
-                )
-                referrer = cur.fetchone()
-                if referrer:
-                    referrer_email = referrer["email"]
-                    cur.execute(
-                        "SELECT COUNT(*) as cnt FROM referrals WHERE referred_by = %s",
-                        (body.referred_by,)
-                    )
-                    new_count = (cur.fetchone()["cnt"] or 0) + 1
-
-                    for (threshold, rank, bonus) in RANK_THRESHOLDS:
-                        if new_count == threshold:
-                            # Check we haven't already sent a promo for this rank
-                            cur.execute(
-                                "SELECT 1 FROM promo_codes WHERE email = %s AND rank = %s",
-                                (referrer_email, rank)
-                            )
-                            if not cur.fetchone():
-                                promo_code = _gen_promo_code(rank)
-                                cur.execute(
-                                    """INSERT INTO promo_codes (code, email, credits, rank)
-                                       VALUES (%s, %s, %s, %s)""",
-                                    (promo_code, referrer_email, bonus, rank)
-                                )
-                                promo_task = (referrer_email, rank, bonus, promo_code)
-                            break
-
         conn.commit()
-
-    # Le code promo est déjà enregistré en base et sera affiché dans l'app
-    # (plus d'envoi d'email pour les codes promo — récupération via /promo/pending)
 
     return {"ref_code": code, "email": body.email}
 
@@ -952,11 +1003,8 @@ def referral_stats(code_or_email: str):
             if not row:
                 raise HTTPException(status_code=404, detail="Introuvable")
 
-            cur.execute(
-                "SELECT COUNT(*) as cnt FROM referrals WHERE referred_by = %s",
-                (row["ref_code"],)
-            )
-            count = cur.fetchone()["cnt"] or 0
+            # Compte VALIDÉ uniquement (invités avec vrai compte + au moins 1 tri)
+            count = _validated_referral_count(cur, row["ref_code"], row["email"])
 
     return {
         "ref_code": row["ref_code"],
